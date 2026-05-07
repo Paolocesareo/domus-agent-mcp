@@ -1,494 +1,182 @@
-// Domus Agent MCP Server
+// Domus Agent MCP Server v1.0.1
 // Cloudflare Worker - Streamable HTTP transport
 // Auth via API key in query string: /mcp?key=xxx
 
 const SUPABASE_URL = "https://nvdodhvpbiwfhnoixslz.supabase.co";
 const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im52ZG9kaHZwYml3Zmhub2l4c2x6Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3MjU0MzEzNCwiZXhwIjoyMDg4MTE5MTM0fQ.8y2lPxg68eFzdl26CC7_YvZLsoMiR6rPeCJ2oR8hVJI";
 
-// --- Supabase helper ---
 async function supaQuery(table, params = "") {
   const url = `${SUPABASE_URL}/rest/v1/${table}?${params}`;
-  const res = await fetch(url, {
-    headers: {
-      apikey: SUPABASE_KEY,
-      Authorization: `Bearer ${SUPABASE_KEY}`,
-      "Content-Type": "application/json",
-    },
-  });
-  if (!res.ok) throw new Error(`Supabase error: ${res.status} ${await res.text()}`);
+  const res = await fetch(url, { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, "Content-Type": "application/json" } });
+  if (!res.ok) throw new Error(`Supabase error on ${table}: ${res.status}`);
   return res.json();
 }
 
-// --- Auth: resolve API key to archivio IDs ---
 async function resolveApiKey(key) {
   if (!key) return null;
   const rows = await supaQuery("api_keys", `select=studio_id,is_active&api_key=eq.${encodeURIComponent(key)}`);
   if (!rows.length || !rows[0].is_active) return null;
   const studioId = rows[0].studio_id;
-  // Get all archivi for this studio
   const archivi = await supaQuery("archivi", `select=id,nome_archivio&studio_id=eq.${encodeURIComponent(studioId)}`);
-  // Update last_used_at
-  await fetch(`${SUPABASE_URL}/rest/v1/api_keys?api_key=eq.${encodeURIComponent(key)}`, {
-    method: "PATCH",
-    headers: {
-      apikey: SUPABASE_KEY,
-      Authorization: `Bearer ${SUPABASE_KEY}`,
-      "Content-Type": "application/json",
-      Prefer: "return=minimal",
-    },
-    body: JSON.stringify({ last_used_at: new Date().toISOString() }),
-  });
+  fetch(`${SUPABASE_URL}/rest/v1/api_keys?api_key=eq.${encodeURIComponent(key)}`, { method: "PATCH", headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, "Content-Type": "application/json", Prefer: "return=minimal" }, body: JSON.stringify({ last_used_at: new Date().toISOString() }) });
   return { studioId, archivi };
 }
 
-// --- Tool definitions ---
 const TOOLS = [
-  {
-    name: "lista_edifici",
-    description: "Elenca tutti gli edifici/condomini gestiti con indirizzo e codice fiscale",
-    inputSchema: {
-      type: "object",
-      properties: {
-        archivio: { type: "string", description: "Nome archivio (opzionale, se non specificato mostra tutti)" },
-      },
-    },
-  },
-  {
-    name: "dettaglio_edificio",
-    description: "Mostra dettaglio di un edificio: unità, proprietari, conduttori",
-    inputSchema: {
-      type: "object",
-      properties: {
-        nome_edificio: { type: "string", description: "Nome o parte del nome dell'edificio" },
-      },
-      required: ["nome_edificio"],
-    },
-  },
-  {
-    name: "situazione_rate",
-    description: "Mostra le rate emesse per un edificio o per tutti, con stato pagamento",
-    inputSchema: {
-      type: "object",
-      properties: {
-        nome_edificio: { type: "string", description: "Nome edificio (opzionale)" },
-        solo_non_pagate: { type: "boolean", description: "Se true, mostra solo rate non pagate" },
-      },
-    },
-  },
-  {
-    name: "cerca_morosi",
-    description: "Trova condomini con rate scadute non pagate, con importi e dettagli",
-    inputSchema: {
-      type: "object",
-      properties: {
-        nome_edificio: { type: "string", description: "Nome edificio (opzionale, se vuoto cerca in tutti)" },
-        importo_minimo: { type: "number", description: "Importo minimo arretrato (default 0)" },
-      },
-    },
-  },
-  {
-    name: "lista_assemblee",
-    description: "Elenca le assemblee con data, ordine del giorno e presenze",
-    inputSchema: {
-      type: "object",
-      properties: {
-        nome_edificio: { type: "string", description: "Nome edificio (opzionale)" },
-      },
-    },
-  },
-  {
-    name: "lista_segnalazioni",
-    description: "Elenca le segnalazioni (guasti, problemi, richieste) con stato e log",
-    inputSchema: {
-      type: "object",
-      properties: {
-        nome_edificio: { type: "string", description: "Nome edificio (opzionale)" },
-      },
-    },
-  },
-  {
-    name: "cerca_anagrafica",
-    description: "Cerca una persona per nome, cognome, codice fiscale o telefono",
-    inputSchema: {
-      type: "object",
-      properties: {
-        termine: { type: "string", description: "Termine di ricerca (nome, cognome, CF, telefono)" },
-      },
-      required: ["termine"],
-    },
-  },
-  {
-    name: "lista_promemoria",
-    description: "Elenca i promemoria attivi o completati",
-    inputSchema: {
-      type: "object",
-      properties: {
-        solo_attivi: { type: "boolean", description: "Se true, mostra solo promemoria non completati" },
-      },
-    },
-  },
+  { name: "lista_edifici", description: "Elenca tutti gli edifici/condomini gestiti con indirizzo e codice fiscale", inputSchema: { type: "object", properties: { archivio: { type: "string", description: "Nome archivio (opzionale)" } } } },
+  { name: "dettaglio_edificio", description: "Mostra dettaglio di un edificio: unita, proprietari, conduttori", inputSchema: { type: "object", properties: { nome_edificio: { type: "string", description: "Nome o parte del nome" } }, required: ["nome_edificio"] } },
+  { name: "situazione_rate", description: "Mostra le rate emesse per un edificio con data e descrizione", inputSchema: { type: "object", properties: { nome_edificio: { type: "string", description: "Nome edificio (opzionale)" } } } },
+  { name: "cerca_morosi", description: "Trova condomini con rate non pagate con importi e contatti", inputSchema: { type: "object", properties: { nome_edificio: { type: "string", description: "Nome edificio (opzionale)" }, importo_minimo: { type: "number", description: "Importo minimo (default 0)" } } } },
+  { name: "lista_assemblee", description: "Elenca assemblee con data convocazione, OdG e presenze", inputSchema: { type: "object", properties: { nome_edificio: { type: "string", description: "Nome edificio (opzionale)" } } } },
+  { name: "lista_segnalazioni", description: "Elenca segnalazioni (guasti, problemi) con stato e log", inputSchema: { type: "object", properties: { nome_edificio: { type: "string", description: "Nome edificio (opzionale)" } } } },
+  { name: "cerca_anagrafica", description: "Cerca persona per nome, CF, telefono o email", inputSchema: { type: "object", properties: { termine: { type: "string", description: "Termine di ricerca" } }, required: ["termine"] } },
+  { name: "lista_promemoria", description: "Elenca i promemoria attivi o completati", inputSchema: { type: "object", properties: { solo_attivi: { type: "boolean", description: "Se true solo non completati" } } } },
 ];
 
-// --- Tool execution ---
 async function executeTool(name, args, ctx) {
-  const archivioIds = ctx.archivi.map((a) => a.id);
-  const archivioFilter = `archivio_id=in.(${archivioIds.join(",")})`;
+  const ids = ctx.archivi.map((a) => a.id);
+  const AF = `archivio_id=in.(${ids.join(",")})`;
 
-  // Helper to filter by edificio name
-  async function findEdificio(nome) {
-    const edifici = await supaQuery("edifici", `select=*&${archivioFilter}&intestazione=ilike.*${encodeURIComponent(nome)}*`);
-    return edifici;
-  }
-
-  // Helper to get esercizio IDs for an edificio
-  async function getEserciziIds(edificioDomId, archivioId) {
-    const esercizi = await supaQuery(
-      "esercizi",
-      `select=domustudio_id&archivio_id=eq.${archivioId}&edificio_domustudio_id=eq.${edificioDomId}&is_straordinario=eq.false&order=data_chiusura.desc&limit=1`
-    );
-    return esercizi.map((e) => e.domustudio_id);
+  async function findEdificio(n) {
+    return await supaQuery("edifici", `select=*&${AF}&intestazione=ilike.*${encodeURIComponent(n)}*`);
   }
 
   switch (name) {
     case "lista_edifici": {
-      let filter = archivioFilter;
-      if (args.archivio) {
-        const arch = ctx.archivi.find((a) => a.nome_archivio.toLowerCase().includes(args.archivio.toLowerCase()));
-        if (arch) filter = `archivio_id=eq.${arch.id}`;
-      }
-      const edifici = await supaQuery("edifici", `select=intestazione,indirizzo,citta,cap,prov,codice_fiscale&${filter}`);
-      return edifici.length
-        ? edifici.map((e) => `🏢 ${e.intestazione}\n   ${e.indirizzo || ""}, ${e.cap || ""} ${e.citta || ""} (${e.prov || ""})\n   CF: ${e.codice_fiscale || "N/D"}`).join("\n\n")
-        : "Nessun edificio trovato.";
+      let f = AF;
+      if (args.archivio) { const a = ctx.archivi.find((x) => x.nome_archivio.toLowerCase().includes(args.archivio.toLowerCase())); if (a) f = `archivio_id=eq.${a.id}`; }
+      const ed = await supaQuery("edifici", `select=intestazione,indirizzo,citta,cap,prov,codice_fiscale&${f}`);
+      return ed.length ? ed.map((e) => `🏢 ${e.intestazione}\n   ${e.indirizzo||""}, ${e.cap||""} ${e.citta||""} (${e.prov|""})\n   CF: ${e.codice_fiscale||"N/D"}`).join("\n\n") : "Nessun edificio trovato.";
     }
-
     case "dettaglio_edificio": {
-      const edifici = await findEdificio(args.nome_edificio);
-      if (!edifici.length) return `Nessun edificio trovato con nome "${args.nome_edificio}"`;
-      const ed = edifici[0];
-      // Get units for this building
-      const unita = await supaQuery(
-        "unita",
-        `select=interno,piano,tipo,subalterno&${archivioFilter}&edificio_domustudio_id=eq.${ed.domustudio_id}&order=interno.asc`
-      );
-      // Get proprietari count
-      const proprietari = await supaQuery(
-        "proprietari",
-        `select=domustudio_id&${archivioFilter}&limit=1000`
-      );
-      return [
-        `🏢 ${ed.intestazione}`,
-        `📍 ${ed.indirizzo || ""}, ${ed.cap || ""} ${ed.citta || ""}`,
-        `CF: ${ed.codice_fiscale || "N/D"}`,
-        `\n📊 Unità: ${unita.length}`,
-        ...unita.map((u) => `  • Int. ${u.interno || "?"} - Piano ${u.piano || "?"} - ${u.tipo || "N/D"} (Sub. ${u.subalterno || "?"})`),
-      ].join("\n");
+      const ed = await findEdificio(args.nome_edificio);
+      if (!ed.length) return `Nessun edificio "${args.nome_edificio}"`;
+      const e = ed[0];
+      const u = await supaQuery("unita", `select=interno,piano,tipo,subalterno&${AF}&edificio_domustudio_id=eq.${e.domustudio_id}&order=interno.asc`);
+      return [`🏢 ${e.intestazione}`, `📍 ${e.indirizzo||""}, ${e.cap||""} ${e.citta||""}`, `CF: ${e.codice_fiscale||"N/D"}`, `\n📊 Unità: ${u.length}`, ...u.map((x) => `  • Int. ${x.interno||"?"} Piano ${x.piano||"?"} ${x.tipo||""} Sub.${x.subalterno||"?"}`)].join("\n");
     }
-
     case "situazione_rate": {
-      let filter = archivioFilter;
       if (args.nome_edificio) {
-        const edifici = await findEdificio(args.nome_edificio);
-        if (!edifici.length) return `Nessun edificio trovato con nome "${args.nome_edificio}"`;
-        // Get esercizi for this edificio
-        const esercizi = await supaQuery(
-          "esercizi",
-          `select=domustudio_id&${archivioFilter}&edificio_domustudio_id=eq.${edifici[0].domustudio_id}`
-        );
-        const esIds = esercizi.map((e) => e.domustudio_id);
-        if (esIds.length) {
-          const rate = await supaQuery(
-            "rate",
-            `select=domustudio_id,data,descrizione,is_straordinaria&${archivioFilter}&esercizio_domustudio_id=in.(${esIds.join(",")})&order=data.desc&limit=20`
-          );
-          // For each rata, get importi
-          const results = [];
-          for (const rata of rate.slice(0, 10)) {
-            const importi = await supaQuery(
-              "rate_importi",
-              `select=importo&${archivioFilter}&rata_domustudio_id=eq.${rata.domustudio_id}`
-            );
-            const totale = importi.reduce((sum, i) => sum + (parseFloat(i.importo) || 0), 0);
-            // Check ricevute
-            const ricevute = await supaQuery(
-              "ricevute_rate",
-              `select=domustudio_id&${archivioFilter}&esercizio_domustudio_id=in.(${esIds.join(",")})&limit=1`
-            );
-            results.push(`📄 ${rata.descrizione || "Rata"} - ${rata.data || ""}\n   Totale: €${totale.toFixed(2)}${rata.is_straordinaria ? " (STRAORDINARIA)" : ""}`);
+        const ed = await findEdificio(args.nome_edificio);
+        if (!ed.length) return `Nessun edificio "${args.nome_edificio}"`;
+        const es = await supaQuery("esercizi", `select=domustudio_id&${AF}&edificio_domustudio_id=eq.${ed[0].domustudio_id}`);
+        if (es.length) {
+          const esIds = es.map((x) => x.domustudio_id).join(",");
+          const rate = await supaQuery("rate", `select=domustudio_id,data_rata,descrizione,is_straordinaria&${AF}&esercizio_domustudio_id=in.(${esIds})&order=data_rata.desc&limit=15`);
+          const res = [];
+          for (const r of rate) {
+            const imp = await supaQuery("rate_importi", `select=importo&${AF}&rata_domustudio_id=eq.${r.domustudio_id}`);
+            const tot = imp.reduce((s, i) => s + (parseFloat(i.importo)||0), 0);
+            res.push(`📄 ${r.descrizione||"Rata"} - ${r.data_rata||""}\n   Totale: €${tot.toFixed(2)}${r.is_straordinaria ? " (STRAORD.)" : ""}`);
           }
-          return results.length ? results.join("\n\n") : "Nessuna rata trovata.";
+          return res.length ? res.join("\n\n") : "Nessuna rata trovata.";
         }
       }
-      // General: count rate per archivio
-      const rate = await supaQuery("rate", `select=domustudio_id,descrizione,data&${archivioFilter}&order=data.desc&limit=20`);
-      return rate.length
-        ? rate.map((r) => `📄 ${r.descrizione || "Rata"} - ${r.data || ""}`).join("\n")
-        : "Nessuna rata trovata.";
+      const rate = await supaQuery("rate", `select=descrizione,data_rata&${AF}&order=data_rata.desc&limit=20`);
+      return rate.length ? rate.map((r) => `📄 ${r.descrizione||"Rata"} - ${r.data_rata||""}`).join("\n") : "Nessuna rata.";
     }
-
     case "cerca_morosi": {
-      // Get rate_importi with importo > 0 and check against ricevute
-      let filter = archivioFilter;
-      const importoMin = args.importo_minimo || 0;
-
-      // Get all rate_importi
-      const importi = await supaQuery(
-        "rate_importi",
-        `select=domustudio_id,rata_domustudio_id,unita_domustudio_id,anagrafica_domustudio_id,importo,archivio_id&${filter}&importo=gt.${importoMin}&limit=500`
-      );
-
-      // Get ricevute to find paid ones
-      const ricevute = await supaQuery(
-        "ricevute_rate_unita",
-        `select=unita_domustudio_id,rata_domustudio_id&${filter}&limit=2000`
-      );
-
-      const pagate = new Set(ricevute.map((r) => `${r.unita_domustudio_id}-${r.rata_domustudio_id}`));
-
-      // Filter unpaid
-      const nonPagate = importi.filter((i) => !pagate.has(`${i.unita_domustudio_id}-${i.rata_domustudio_id}`));
-
-      if (!nonPagate.length) return "Nessun moroso trovato! Tutti in regola. ✅";
-
-      // Aggregate by anagrafica
-      const perPersona = {};
-      for (const np of nonPagate) {
-        const key = `${np.archivio_id}-${np.anagrafica_domustudio_id}`;
-        if (!perPersona[key]) perPersona[key] = { anagId: np.anagrafica_domustudio_id, archivioId: np.archivio_id, totale: 0, count: 0 };
-        perPersona[key].totale += parseFloat(np.importo) || 0;
-        perPersona[key].count++;
-      }
-
-      // Sort by amount desc
-      const sorted = Object.values(perPersona).sort((a, b) => b.totale - a.totale).slice(0, 20);
-
-      // Get names
-      const results = [];
+      const minImp = args.importo_minimo || 0;
+      const importi = await supaQuery("rate_importi", `select=rata_domustudio_id,unita_domustudio_id,anagrafica_domustudio_id,importo,archivio_id&${AF}&importo=gt.${minImp}&limit=500`);
+      const ricevute = await supaQuery("ricevute_rate_unita", `select=unita_domustudio_id,ricevuta_domustudio_id&${AF}&limit=2000`);
+      const ricRate = await supaQuery("ricevute_rate", `select=domustudio_id,anagrafica_domustudio_id&${AF}&limit=2000`);
+      const pagate = new Set();
+      for (const ru of ricevute) { const rr = ricRate.find(r => r.domustudio_id === ru.ricevuta_domustudio_id); if (rr) pagate.add(`${rr.anagrafica_domustudio_id}-${ru.unita_domustudio_id}`); }
+      const pp = {};
+      for (const i of importi) { const k = `${i.archivio_id}-${i.anagrafica_domustudio_id}`; if (!pp[k]) pp[k] = { anagId: i.anagrafica_domustudio_id, archId: i.archivio_id, tot: 0, cnt: 0 }; pp[k].tot += parseFloat(i.importo)||0; pp[k].cnt++; }
+      if (!Object.keys(pp).length) return "Nessun moroso trovato! Tutti in regola. ✅";
+      const sorted = Object.values(pp).sort((a,b) => b.tot - a.tot).slice(0, 20);
+      const res = [];
       for (const p of sorted) {
-        const anag = await supaQuery(
-          "anagrafiche",
-          `select=descrizione,telefono1,email&archivio_id=eq.${p.archivioId}&domustudio_id=eq.${p.anagId}&limit=1`
-        );
-        const nome = anag.length ? anag[0].descrizione : `ID ${p.anagId}`;
-        const tel = anag.length && anag[0].telefono1 ? ` - Tel: ${anag[0].telefono1}` : "";
-        const email = anag.length && anag[0].email ? ` - ${anag[0].email}` : "";
-        results.push(`⚠️ ${nome}: €${p.totale.toFixed(2)} (${p.count} rate non pagate)${tel}${email}`);
+        const an = await supaQuery("anagrafiche", `select=descrizione,telefono1,email&archivio_id=eq.${p.archId}&domustudio_id=eq.${p.anagId}&limit=1`);
+        const nm = an.length ? an[0].descrizione : `ID ${p.anagId}`;
+        const tel = an.length && an[0].telefono1 ? ` Tel:${an[0].telefono1}` : "";
+        const em = an.length && an[0].email ? ` ${an[0].email}` : "";
+        res.push(`⚠️ ${nm}: €${p.tot.toFixed(2)} (${p.cnt} rate)${tel}${em}`);
       }
-
-      return `Trovati ${Object.keys(perPersona).length} morosi:\n\n${results.join("\n")}`;
+      return `Trovati ${Object.keys(pp).length} posizioni:\n\n${res.join("\n")}`;
     }
-
     case "lista_assemblee": {
-      let filter = archivioFilter;
-      if (args.nome_edificio) {
-        const edifici = await findEdificio(args.nome_edificio);
-        if (!edifici.length) return `Nessun edificio trovato con nome "${args.nome_edificio}"`;
-        const esercizi = await supaQuery(
-          "esercizi",
-          `select=domustudio_id&${archivioFilter}&edificio_domustudio_id=eq.${edifici[0].domustudio_id}`
-        );
-        const esIds = esercizi.map((e) => e.domustudio_id);
-        if (esIds.length) {
-          filter = `${archivioFilter}&esercizio_domustudio_id=in.(${esIds.join(",")})`;
-        }
+      let f = AF;
+      if (args.nome_edificio) { const ed = await findEdificio(args.nome_edificio); if (ed.length) f = `${AF}&edificio_domustudio_id=eq.${ed[0].domustudio_id}`; else return `Nessun edificio "${args.nome_edificio}"`; }
+      const ass = await supaQuery("assemblee", `select=domustudio_id,prima_convocazione_data,prima_convocazione_ora,prima_convocazione_luogo,seconda_convocazione_data,seconda_convocazione_ora,descrizione,archivio_id&${f}&order=prima_convocazione_data.desc&limit=10`);
+      if (!ass.length) return "Nessuna assemblea trovata.";
+      const res = [];
+      for (const a of ass) {
+        const odg = await supaQuery("assemblee_odg", `select=voce,sort_id&archivio_id=eq.${a.archivio_id}&assemblea_domustudio_id=eq.${a.domustudio_id}&order=sort_id.asc`);
+        const pres = await supaQuery("assemblee_presenti", `select=domustudio_id&archivio_id=eq.${a.archivio_id}&assemblea_domustudio_id=eq.${a.domustudio_id}`);
+        res.push([`📋 Assemblea ${a.prima_convocazione_data||"?"}${a.prima_convocazione_ora?" ore "+a.prima_convocazione_ora:""}`, `   Luogo: ${a.prima_convocazione_luogo||"N/D"}`, a.seconda_convocazione_data?`   2ª conv: ${a.seconda_convocazione_data}`:null, `   Presenti: ${pres.length}`, ...(odg.length?[`   OdG:\n${odg.map(o=>`     ${o.sort_id}. ${o.voce}`).join("\n")}`]:[])].filter(Boolean).join("\n"));
       }
-      const assemblee = await supaQuery("assemblee", `select=*&${filter}&order=data.desc&limit=10`);
-      if (!assemblee.length) return "Nessuna assemblea trovata.";
-
-      const results = [];
-      for (const a of assemblee) {
-        const odg = await supaQuery("assemblee_odg", `select=descrizione&${archivioFilter}&assemblea_domustudio_id=eq.${a.domustudio_id}`);
-        const presenti = await supaQuery("assemblee_presenti", `select=domustudio_id&${archivioFilter}&assemblea_domustudio_id=eq.${a.domustudio_id}`);
-        results.push([
-          `📋 Assemblea del ${a.data || "?"}`,
-          `   Tipo: ${a.tipo || "Ordinaria"} - Presenti: ${presenti.length}`,
-          ...(odg.length ? [`   OdG: ${odg.map((o) => o.descrizione).join("; ")}`] : []),
-        ].join("\n"));
-      }
-      return results.join("\n\n");
+      return res.join("\n\n");
     }
-
     case "lista_segnalazioni": {
-      let filter = archivioFilter;
-      const segnalazioni = await supaQuery("segnalazioni", `select=*&${filter}&order=data.desc&limit=20`);
-      if (!segnalazioni.length) return "Nessuna segnalazione trovata.";
-
-      const tipi = await supaQuery("segnalazioni_tipo", `select=domustudio_id,descrizione&${filter}`);
-      const tipoMap = {};
-      for (const t of tipi) tipoMap[t.domustudio_id] = t.descrizione;
-
-      const results = [];
-      for (const s of segnalazioni) {
-        const logs = await supaQuery("segnalazioni_log", `select=data,descrizione&${archivioFilter}&segnalazione_domustudio_id=eq.${s.domustudio_id}&order=data.desc&limit=3`);
-        results.push([
-          `🔧 ${s.oggetto || "Segnalazione"} [${tipoMap[s.tipo_domustudio_id] || ""}]`,
-          `   Data: ${s.data || "?"} - Stato: ${s.stato || "?"}`,
-          ...(logs.length ? logs.map((l) => `   └ ${l.data}: ${l.descrizione}`) : []),
-        ].join("\n"));
+      let f = AF;
+      if (args.nome_edificio) { const ed = await findEdificio(args.nome_edificio); if (ed.length) f = `${AF}&edificio_domustudio_id=eq.${ed[0].domustudio_id}`; }
+      const seg = await supaQuery("segnalazioni", `select=domustudio_id,oggetto,data,stato,priorita,tipo_segnalazione_domustudio_id,data_chiusura,archivio_id&${f}&order=data.desc&limit=20`);
+      if (!seg.length) return "Nessuna segnalazione trovata.";
+      const tipi = await supaQuery("segnalazioni_tipo", `select=domustudio_id,descrizione&${AF}`);
+      const tm = {}; for (const t of tipi) tm[t.domustudio_id] = t.descrizione;
+      const res = [];
+      for (const s of seg) {
+        const logs = await supaQuery("segnalazioni_log", `select=log_timestamp,desc_extra_data_short&archivio_id=eq.${s.archivio_id}&segnalazione_domustudio_id=eq.${s.domustudio_id}&order=log_timestamp.desc&limit=3`);
+        res.push([`🔧 ${s.oggetto||"Segnalazione"} [${tm[s.tipo_segnalazione_domustudio_id]||""}]`, `   Data: ${s.data||"?"} Stato: ${s.stato||"?"} Priorità: ${s.priorita||"?"}`, s.data_chiusura?`   Chiusa: ${s.data_chiusura}`:null, ...(logs.length?logs.map(l=>`   └ ${l.log_timestamp||""}: ${l.desc_extra_data_short||""}`):[])].filter(Boolean).join("\n"));
       }
-      return results.join("\n\n");
+      return res.join("\n\n");
     }
-
     case "cerca_anagrafica": {
       const t = encodeURIComponent(args.termine);
-      const anag = await supaQuery(
-        "anagrafiche",
-        `select=descrizione,indirizzo,citta,codice_fiscale,partita_iva,telefono1,telefono2,email,pec,is_fornitore&${archivioFilter}&or=(descrizione.ilike.*${t}*,codice_fiscale.ilike.*${t}*,telefono1.ilike.*${t}*,email.ilike.*${t}*)&limit=10`
-      );
-      if (!anag.length) return `Nessuna persona trovata per "${args.termine}"`;
-      return anag
-        .map(
-          (a) =>
-            `👤 ${a.descrizione}${a.is_fornitore ? " [FORNITORE]" : ""}\n` +
-            `   ${a.indirizzo || ""} ${a.citta || ""}\n` +
-            `   CF: ${a.codice_fiscale || "N/D"} | P.IVA: ${a.partita_iva || "N/D"}\n` +
-            `   Tel: ${a.telefono1 || "N/D"} | Email: ${a.email || "N/D"}${a.pec ? ` | PEC: ${a.pec}` : ""}`
-        )
-        .join("\n\n");
+      const an = await supaQuery("anagrafiche", `select=descrizione,indirizzo,citta,codice_fiscale,partita_iva,telefono1,telefono2,email,pec,is_fornitore&${AF}&or=(descrizione.ilike.*${t}*,codice_fiscale.ilike.*${t}*,telefono1.ilike.*${t}*,email.ilike.*${t}*)&limit=10`);
+      if (!an.length) return `Nessuna persona trovata per "${args.termine}"`;
+      return an.map(a => `👤 ${a.descrizione}${a.is_fornitore?" [FORNITORE]":""}\n   ${a.indirizzo||""} ${a.citta||""}\n   CF: ${a.codice_fiscale||"N/D"} | P.IVA: ${a.partita_iva||"N/D"}\n   Tel: ${a.telefono1||"N/D"} | Email: ${a.email||"N/D"}${a.pec?` | PEC: ${a.pec}`:""}`).join("\n\n");
     }
-
     case "lista_promemoria": {
-      let filter = archivioFilter;
-      const promemoria = await supaQuery("promemoria", `select=*&${filter}&order=data.desc&limit=20`);
-      if (!promemoria.length) return "Nessun promemoria trovato.";
-      return promemoria
-        .map((p) => {
-          const stato = p.eseguito ? "✅" : "⏳";
-          return `${stato} ${p.oggetto || "Promemoria"} - ${p.data || "?"}\n   ${p.descrizione || ""}`;
-        })
-        .join("\n\n");
+      const pm = await supaQuery("promemoria", `select=*&${AF}&order=data.desc&limit=20`);
+      if (!pm.length) return "Nessun promemoria.";
+      return pm.map(p => `${p.eseguito?"✅":"⏳"} ${p.oggetto||"Promemoria"} - ${p.data||"?"}\n   ${p.descrizione||""}`).join("\n\n");
     }
-
-    default:
-      return `Tool "${name}" non riconosciuto.`;
+    default: return `Tool "${name}" non riconosciuto.`;
   }
 }
 
-// --- MCP Protocol Handler ---
-function jsonRpc(id, result) {
-  return { jsonrpc: "2.0", id, result };
-}
-
-function jsonRpcError(id, code, message) {
-  return { jsonrpc: "2.0", id, error: { code, message } };
-}
+function jsonRpc(id, result) { return { jsonrpc: "2.0", id, result }; }
+function jsonRpcError(id, code, message) { return { jsonrpc: "2.0", id, error: { code, message } }; }
 
 async function handleMcpRequest(body, ctx) {
   const { method, id, params } = body;
-
   switch (method) {
-    case "initialize":
-      return jsonRpc(id, {
-        protocolVersion: "2025-03-26",
-        capabilities: { tools: {} },
-        serverInfo: { name: "Domus Agent", version: "1.0.0" },
-      });
-
-    case "notifications/initialized":
-      return null; // notification, no response
-
-    case "tools/list":
-      return jsonRpc(id, { tools: TOOLS });
-
+    case "initialize": return jsonRpc(id, { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "Domus Agent", version: "1.0.1" } });
+    case "notifications/initialized": return null;
+    case "tools/list": return jsonRpc(id, { tools: TOOLS });
     case "tools/call": {
-      const toolName = params?.name;
-      const toolArgs = params?.arguments || {};
-      try {
-        const result = await executeTool(toolName, toolArgs, ctx);
-        return jsonRpc(id, { content: [{ type: "text", text: result }] });
-      } catch (err) {
-        return jsonRpc(id, { content: [{ type: "text", text: `Errore: ${err.message}` }], isError: true });
-      }
+      try { const result = await executeTool(params?.name, params?.arguments||{}, ctx); return jsonRpc(id, { content: [{ type: "text", text: result }] }); }
+      catch (err) { return jsonRpc(id, { content: [{ type: "text", text: `Errore: ${err.message}` }], isError: true }); }
     }
-
-    case "ping":
-      return jsonRpc(id, {});
-
-    default:
-      return jsonRpcError(id, -32601, `Method not found: ${method}`);
+    case "ping": return jsonRpc(id, {});
+    default: return jsonRpcError(id, -32601, `Method not found: ${method}`);
   }
 }
 
-// --- Worker entry point ---
 export default {
   async fetch(request) {
     const url = new URL(request.url);
     const path = url.pathname;
-
-    // CORS headers
-    const corsHeaders = {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type, Authorization",
-    };
-
-    if (request.method === "OPTIONS") {
-      return new Response(null, { headers: corsHeaders });
-    }
-
-    // Health check
-    if (path === "/" || path === "/health") {
-      return new Response(JSON.stringify({ status: "ok", service: "Domus Agent MCP" }), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
-
-    // MCP endpoint
+    const cors = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, POST, OPTIONS", "Access-Control-Allow-Headers": "Content-Type, Authorization" };
+    if (request.method === "OPTIONS") return new Response(null, { headers: cors });
+    if (path === "/" || path === "/health") return new Response(JSON.stringify({ status: "ok", service: "Domus Agent MCP", version: "1.0.1" }), { headers: { ...cors, "Content-Type": "application/json" } });
     if (path === "/mcp" || path === "/sse") {
-      // Auth
       const apiKey = url.searchParams.get("key");
-      if (!apiKey) {
-        return new Response(JSON.stringify({ error: "API key richiesta. Usa ?key=TUA_API_KEY" }), {
-          status: 401,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
-      }
-
+      if (!apiKey) return new Response(JSON.stringify({ error: "API key richiesta" }), { status: 401, headers: { ...cors, "Content-Type": "application/json" } });
       const ctx = await resolveApiKey(apiKey);
-      if (!ctx) {
-        return new Response(JSON.stringify({ error: "API key non valida o disattivata." }), {
-          status: 403,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
-      }
-
+      if (!ctx) return new Response(JSON.stringify({ error: "API key non valida" }), { status: 403, headers: { ...cors, "Content-Type": "application/json" } });
       if (request.method === "POST") {
         const body = await request.json();
-
-        // Handle batch requests
-        if (Array.isArray(body)) {
-          const results = [];
-          for (const req of body) {
-            const res = await handleMcpRequest(req, ctx);
-            if (res) results.push(res);
-          }
-          return new Response(JSON.stringify(results), {
-            headers: { ...corsHeaders, "Content-Type": "application/json" },
-          });
-        }
-
-        // Single request
+        if (Array.isArray(body)) { const r = []; for (const req of body) { const res = await handleMcpRequest(req, ctx); if (res) r.push(res); } return new Response(JSON.stringify(r), { headers: { ...cors, "Content-Type": "application/json" } }); }
         const result = await handleMcpRequest(body, ctx);
-        if (!result) return new Response("", { status: 204, headers: corsHeaders });
-        return new Response(JSON.stringify(result), {
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
+        if (!result) return new Response("", { status: 204, headers: cors });
+        return new Response(JSON.stringify(result), { headers: { ...cors, "Content-Type": "application/json" } });
       }
-
-      // GET - return server info for SSE clients
-      if (request.method === "GET") {
-        return new Response(JSON.stringify({
-          name: "Domus Agent MCP",
-          version: "1.0.0",
-          description: "Connettore per dati condomini da Domustudio",
-          tools: TOOLS.length,
-          archivi: ctx.archivi.map((a) => a.nome_archivio),
-        }), {
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
-      }
+      if (request.method === "GET") return new Response(JSON.stringify({ name: "Domus Agent MCP", version: "1.0.1", tools: TOOLS.length, archivi: ctx.archivi.map(a => a.nome_archivio) }), { headers: { ...cors, "Content-Type": "application/json" } });
     }
-
-    return new Response("Not found", { status: 404, headers: corsHeaders });
+    return new Response("Not found", { status: 404, headers: cors });
   },
 };
